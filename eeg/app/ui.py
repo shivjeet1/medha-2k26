@@ -178,7 +178,7 @@ class DashboardWidget(QWidget):
         ecg_layout = QHBoxLayout(self.ecg_tab)
         
         self.ecg_plot = pg.PlotWidget(title="Live ECG Waveform")
-        self.ecg_plot.setYRange(0, 1024)
+        self.ecg_plot.setYRange(400, 624)  # Zoomed in, but completely fixed to prevent glitchy bouncing
         self.ecg_plot.setLabel('left', 'Amplitude', units='ADC Counts')
         self.ecg_plot.setLabel('bottom', 'Samples', units='(250 Hz)')
         self.ecg_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -211,15 +211,8 @@ class DashboardWidget(QWidget):
         hrv_layout.addWidget(self.stress_val)
         ecg_stats_layout.addWidget(self.hrv_frame)
 
-        self.sq_frame = QFrame()
-        self.sq_frame.setStyleSheet("background-color: #e2e3e5; border-radius: 10px; padding: 20px;")
-        sq_layout = QVBoxLayout(self.sq_frame)
-        self.sq_val = QLabel("Awaiting Data...")
-        self.sq_val.setAlignment(Qt.AlignCenter)
-        self.sq_val.setFont(QFont("Arial", 16, QFont.Bold))
-        sq_layout.addWidget(QLabel("Signal Quality"))
-        sq_layout.addWidget(self.sq_val)
-        ecg_stats_layout.addWidget(self.sq_frame)
+        # Signal Quality frame removed completely as requested
+
         
         ecg_stats_layout.addStretch()
         ecg_layout.addLayout(ecg_stats_layout, stretch=1)
@@ -230,7 +223,7 @@ class DashboardWidget(QWidget):
         eeg_layout = QVBoxLayout(self.eeg_tab)
         
         self.eeg_plot = pg.PlotWidget(title="Live EEG Waveform")
-        self.eeg_plot.setYRange(0, 1024)
+        self.eeg_plot.setYRange(400, 624)  # Zoomed in and completely fixed
         self.eeg_plot.showGrid(x=True, y=True, alpha=0.3)
         self.eeg_curve = self.eeg_plot.plot(pen=pg.mkPen('#457b9d', width=2))
         eeg_layout.addWidget(self.eeg_plot, stretch=1)
@@ -373,18 +366,8 @@ class DashboardWidget(QWidget):
         raw_data = self.data_buffer.copy()
         current_tab = self.tabs.currentIndex()
 
-        if np.std(raw_data) < 0.1:
-            if current_tab == 0:
-                self.ecg_curve.setData(raw_data)
-                self.sq_val.setText("Flatline / DC")
-                self.sq_val.setStyleSheet("color: red;")
-                self.bpm_val.setText("-- BPM")
-                if hasattr(self, 'smoothed_bpm'): del self.smoothed_bpm
-            elif current_tab == 1:
-                self.eeg_curve.setData(raw_data)
-                self.fft_curve.setData([], [])
-                self.band_bars.setOpts(height=[0, 0, 0, 0])
-            return
+        # Flatline checks removed.
+
 
         try:
             notched = filtfilt(self.b_notch, self.a_notch, raw_data)
@@ -408,45 +391,17 @@ class DashboardWidget(QWidget):
         if current_tab == 0:
             self.ecg_curve.setData(display_filtered)
             p2p_amplitude = np.max(display_filtered) - np.min(display_filtered)
-            
-            if self.current_lo_p == 1 or self.current_lo_m == 1:
-                self.sq_val.setText("ERROR: LEAD OFF\n(Check Electrodes)")
-                self.sq_val.setStyleSheet("color: red;")
-                self.bpm_val.setText("-- BPM")
-                self.hrv_val.setText("-- ms")
-                self.stress_val.setText("Awaiting Data")
-                if hasattr(self, 'smoothed_bpm'): del self.smoothed_bpm
-                if hasattr(self, 'smoothed_rmssd'): del self.smoothed_rmssd
-                
-            elif p2p_amplitude < 40 or np.std(raw_data) < 5:
-                self.sq_val.setText("Disconnected / Flat")
-                self.sq_val.setStyleSheet("color: orange;")
-                self.bpm_val.setText("-- BPM")
-                self.hrv_val.setText("-- ms")
-                self.stress_val.setText("Awaiting Data")
-                if hasattr(self, 'smoothed_bpm'): del self.smoothed_bpm
-                if hasattr(self, 'smoothed_rmssd'): del self.smoothed_rmssd
-                
-            elif np.max(raw_data) > 1000 or np.min(raw_data) < 10:
-                self.sq_val.setText("Poor / Clipping")
-                self.sq_val.setStyleSheet("color: orange;")
-                self.bpm_val.setText("-- BPM")
-                self.hrv_val.setText("-- ms")
-                self.stress_val.setText("Awaiting Data")
-                if hasattr(self, 'smoothed_bpm'): del self.smoothed_bpm
-                if hasattr(self, 'smoothed_rmssd'): del self.smoothed_rmssd
-                
-            else:
-                self.sq_val.setText("Good")
-                self.sq_val.setStyleSheet("color: green;")
-                
+            # Signal Quality checks removed, ALWAYS attempt to calculate Heart Rate.
+            if self.ptr >= self.fs * 2:
                 if not hasattr(self, 'qrs_b'):
                     self.qrs_b, self.qrs_a = butter(2, [5.0, 15.0], btype='band', fs=self.fs)
                 
                 try:
                     qrs_filtered = filtfilt(self.qrs_b, self.qrs_a, raw_data)
                     qrs_squared = qrs_filtered ** 2
-                    threshold = np.mean(qrs_squared) * 2.5
+                    # Use a more resilient threshold for noisy signals: 35% of the max peak in the window
+                    # This ensures we catch the R-peaks even if the mean noise floor is relatively high.
+                    threshold = max(np.mean(qrs_squared) * 1.5, np.max(qrs_squared) * 0.3)
                     peaks, _ = find_peaks(qrs_squared, distance=int(self.fs * 0.3), height=threshold)
                     
                     if len(peaks) > 1:
@@ -541,8 +496,19 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.sign_in_view)
         self.stack.addWidget(self.dashboard_view)
         
-        # Connect Login Event -> Transition to Dashboard
-        self.sign_in_view.login_successful.connect(self.transition_to_dashboard)
+        # --- LOGIN BYPASS (Development Mode) ---
+        # To re-enable the login page, uncomment the connection below and remove the bypass code
+        # self.sign_in_view.login_successful.connect(self.transition_to_dashboard)
+        
+        dev_patient = {
+            "id": "DEV-001",
+            "name": "Developer Test",
+            "age": "25",
+            "gender": "Other",
+            "gmail": "dev@local"
+        }
+        self.transition_to_dashboard(dev_patient)
+        # ---------------------------------------
         
     def transition_to_dashboard(self, patient_data):
         self.dashboard_view.set_patient_data(patient_data)

@@ -156,12 +156,21 @@ class DashboardWidget(QWidget):
         self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #333;")
         status_layout.addWidget(self.status_label, alignment=Qt.AlignRight)
         
-        self.record_btn = QPushButton("[REC] Start Recording Session")
-        self.record_btn.setFixedSize(220, 45)
+        btn_layout = QHBoxLayout()
+        
+        self.pause_btn = QPushButton("⏸ Pause Session")
+        self.pause_btn.setFixedSize(160, 45)
+        self.pause_btn.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold; font-size: 14px; border-radius: 5px;")
+        self.pause_btn.clicked.connect(self.toggle_pause)
+        btn_layout.addWidget(self.pause_btn)
+        
+        self.record_btn = QPushButton("[REC] Start Recording")
+        self.record_btn.setFixedSize(200, 45)
         self.record_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; font-size: 14px; border-radius: 5px;")
         self.record_btn.clicked.connect(self.toggle_recording)
-        status_layout.addWidget(self.record_btn, alignment=Qt.AlignRight)
-        top_layout.addLayout(status_layout)
+        btn_layout.addWidget(self.record_btn)
+        
+        status_layout.addLayout(btn_layout)
 
         main_layout.addWidget(top_panel)
 
@@ -182,7 +191,7 @@ class DashboardWidget(QWidget):
         self.ecg_plot.setLabel('left', 'Amplitude', units='ADC Counts')
         self.ecg_plot.setLabel('bottom', 'Samples', units='(250 Hz)')
         self.ecg_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.ecg_curve = self.ecg_plot.plot(pen=pg.mkPen('#e63946', width=2))
+        self.ecg_curve = self.ecg_plot.plot(pen=pg.mkPen('#e63946', width=2), antialias=True)
         ecg_layout.addWidget(self.ecg_plot, stretch=3)
         
         ecg_stats_layout = QVBoxLayout()
@@ -225,7 +234,7 @@ class DashboardWidget(QWidget):
         self.eeg_plot = pg.PlotWidget(title="Live EEG Waveform")
         self.eeg_plot.setYRange(400, 624)  # Zoomed in and completely fixed
         self.eeg_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.eeg_curve = self.eeg_plot.plot(pen=pg.mkPen('#457b9d', width=2))
+        self.eeg_curve = self.eeg_plot.plot(pen=pg.mkPen('#457b9d', width=2), antialias=True)
         eeg_layout.addWidget(self.eeg_plot, stretch=1)
 
         eeg_bottom_layout = QHBoxLayout()
@@ -249,10 +258,9 @@ class DashboardWidget(QWidget):
         self.tabs.addTab(self.eeg_tab, "EEG Analysis")
 
         # ------------------------------------------
-        # DATA & SYSTEM INITIALIZATION
         # ------------------------------------------
         self.fs = 250.0
-        self.max_points = int(self.fs * 4) 
+        self.max_points = int(self.fs * 4) # Reverted to 4 seconds to prevent visual aliasing/squishing
         self.data_buffer = np.zeros(self.max_points)
         self.ptr = 0
 
@@ -260,11 +268,12 @@ class DashboardWidget(QWidget):
         self.current_lo_m = 0
 
         self.is_recording = False
+        self.is_paused = False
         self.recorded_data = []
 
         self.b_notch, self.a_notch = iirnotch(w0=50.0, Q=30.0, fs=self.fs)
-        # Dedicated smooth filter for ECG (0.5 to 30 Hz, sharper N=4 order to eliminate muscle noise)
-        self.b_ecg, self.a_ecg = butter(N=4, Wn=[0.5, 30.0], btype='band', fs=self.fs)
+        # Dedicated smooth filter for ECG (0.5 to 20 Hz, aggressive lowpass to eliminate all muscle noise)
+        self.b_ecg, self.a_ecg = butter(N=4, Wn=[0.5, 20.0], btype='band', fs=self.fs)
         # Wider filter for EEG to preserve Beta/Gamma brainwaves (0.5 to 40 Hz)
         self.b_eeg, self.a_eeg = butter(N=4, Wn=[0.5, 40.0], btype='band', fs=self.fs)
 
@@ -286,13 +295,32 @@ class DashboardWidget(QWidget):
         gmail = data.get("gmail")
         
         header_html = f"""
-        <b>Patient:</b> {name} &nbsp;|&nbsp; 
+        <b>User:</b> {name} &nbsp;|&nbsp; 
         <b>ID:</b> {pid} &nbsp;|&nbsp; 
         <b>Age:</b> {age} &nbsp;|&nbsp; 
         <b>Gender:</b> {gender} &nbsp;|&nbsp; 
         <b>Account:</b> {gmail}
         """
         self.header_label.setText(header_html)
+        
+        # --- DOCTOR MODE LOGIC ---
+        if pid.startswith("MD") or pid.startswith("DOC"):
+            self.pause_btn.show()
+        else:
+            self.pause_btn.hide()
+        # -------------------------
+
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused
+        if self.is_paused:
+            self.pause_btn.setText("▶ Resume Display")
+            self.pause_btn.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; font-size: 14px; border-radius: 5px;")
+            self.update_status("Session Paused (CSV Recording Halted)")
+        else:
+            self.pause_btn.setText("⏸ Pause Session")
+            self.pause_btn.setStyleSheet("background-color: #ffc107; color: black; font-weight: bold; font-size: 14px; border-radius: 5px;")
+            self.update_status("Monitoring...")
+
 
     def toggle_recording(self):
         if not self.is_recording:
@@ -303,7 +331,7 @@ class DashboardWidget(QWidget):
             self.update_status("[REC] Recording active...")
         else:
             self.is_recording = False
-            self.record_btn.setText("[REC] Start Recording Session")
+            self.record_btn.setText("[REC] Start Recording")
             self.record_btn.setStyleSheet("background-color: #28a745; color: white; font-weight: bold; font-size: 14px; border-radius: 5px;")
             self.save_recording()
 
@@ -384,6 +412,9 @@ class DashboardWidget(QWidget):
         except ValueError:
             return 
             
+        if self.is_paused:
+            return
+
         if self.is_recording:
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             self.recorded_data.append([now_str, round(display_filtered[-1], 2), self.current_lo_p, self.current_lo_m])
@@ -444,11 +475,6 @@ class DashboardWidget(QWidget):
 
         elif current_tab == 1:
             self.eeg_curve.setData(display_filtered)
-            
-            if self.current_lo_p == 1 or self.current_lo_m == 1:
-                self.fft_curve.setData([], [])
-                self.band_bars.setOpts(height=[0, 0, 0, 0])
-                return
 
             windowed = filtered * np.hamming(len(filtered))
             fft_vals = np.abs(np.fft.rfft(windowed))
@@ -496,18 +522,18 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.sign_in_view)
         self.stack.addWidget(self.dashboard_view)
         
-        # --- LOGIN BYPASS (Development Mode) ---
+        # --- LOGIN BYPASS (Doctor Mode) ---
         # To re-enable the login page, uncomment the connection below and remove the bypass code
         # self.sign_in_view.login_successful.connect(self.transition_to_dashboard)
         
-        dev_patient = {
-            "id": "DEV-001",
-            "name": "Developer Test",
-            "age": "25",
-            "gender": "Other",
-            "gmail": "dev@local"
+        doc_profile = {
+            "id": "MD-9901",
+            "name": "Dr. Clinical Admin",
+            "age": "45",
+            "gender": "Male",
+            "gmail": "admin@clinic.local"
         }
-        self.transition_to_dashboard(dev_patient)
+        self.transition_to_dashboard(doc_profile)
         # ---------------------------------------
         
     def transition_to_dashboard(self, patient_data):
